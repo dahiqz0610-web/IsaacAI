@@ -253,7 +253,7 @@ st.markdown("---")
 for msg in chat_activo["historial"]:
     with st.chat_message(msg["role"]):
         if msg.get("tipo") == "imagen":
-            st.image(msg["content"], caption=f"🎨 Imagen: {msg.get('prompt', '')}", use_container_width=True)
+            st.image(msg["content"], caption=f"🎨 {msg.get('prompt', '')}", use_container_width=True)
         else:
             st.markdown(msg["content"])
 
@@ -263,8 +263,8 @@ if st.session_state.tipo_usuario == "Invitado" and mensajes_enviados >= 5:
     bloqueado_por_restriccion = True
     st.error("⚠️ Límite del Modo Invitado alcanzado.")
 
-# Texto dinámico en el campo de texto según el modo activo
-placeholder_chat = "Escribe tu pregunta o duda..." if modo_operacion == "💬 Modo Texto / Chat" else "Describe la imagen que quieres crear (ej: Un gato astronauta en Marte)..."
+# Texto dinámico en el campo de entrada
+placeholder_chat = "Escribe tu pregunta o duda..." if modo_operacion == "💬 Modo Texto / Chat" else "Pide una imagen o solicita cambios a la anterior (ej: ponle un micrófono al lado)..."
 
 if not bloqueado_por_restriccion:
     if prompt := st.chat_input(placeholder_chat):
@@ -297,37 +297,73 @@ if not bloqueado_por_restriccion:
             st.rerun()
 
         # ==========================================
-        # 🎨 MODO GENERAR IMAGEN
+        # 🎨 MODO GENERAR IMAGEN (CON MEMORIA CONTEXTUAL)
         # ==========================================
         elif modo_operacion == "🎨 Modo Generar Imagen":
             with st.chat_message("assistant"):
                 marcador_animado = st.empty()
                 
                 marcador_animado.markdown(
-                    '<div class="animacion-cargando">🎨 Ilustrando y generando imagen...</div>', 
+                    '<div class="animacion-cargando">🧠 Analizando petición y memoria visual...</div>', 
                     unsafe_allow_html=True
                 )
 
                 try:
-                    # Usamos un prompt optimizado para asegurar la mejor calidad posible
-                    prompt_enriquecido = f"{prompt}, highly detailed, 8k resolution, photorealistic, masterpiece"
+                    # 1. Buscar si hay una imagen previa creada en esta conversación para actuar como contexto
+                    ultimo_prompt_en = ""
+                    for msg_h in reversed(chat_activo["historial"][:-1]):
+                        if msg_h.get("tipo") == "imagen" and msg_h.get("prompt_en"):
+                            ultimo_prompt_en = msg_h.get("prompt_en")
+                            break
+
+                    # 2. Sintetizar el prompt usando Llama 3.1
+                    if ultimo_prompt_en:
+                        system_prompt = (
+                            "You are an expert AI image prompt generator. "
+                            "The user already generated an image and now wants to modify, improve, or add details to it. "
+                            "Combine the previous image prompt with the user's new request into a single cohesive, highly-detailed English prompt. "
+                            "Output ONLY the final English prompt string. Do NOT include quotes, intros, or explanations."
+                        )
+                        user_prompt = f"Previous Image Description: '{ultimo_prompt_en}'\nUser New Request: '{prompt}'"
+                    else:
+                        system_prompt = (
+                            "You are an expert AI image prompt generator. "
+                            "Translate and enrich the user's request into a single, detailed, highly descriptive English prompt for AI art generation. "
+                            "Output ONLY the final English prompt string. Do NOT include quotes, intros, or explanations."
+                        )
+                        user_prompt = f"User Request: '{prompt}'"
+
+                    res_prompt = client.chat.completions.create(
+                        model=MODELO_TEXTO,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        temperature=0.3,
+                        max_tokens=120
+                    )
+
+                    prompt_sintetizado = res_prompt.choices[0].message.content.strip().replace('"', '')
+                    prompt_enriquecido = f"{prompt_sintetizado}, highly detailed, 8k resolution, masterpiece"
+
+                    marcador_animado.markdown(
+                        '<div class="animacion-cargando">🎨 Renderizando la imagen modificada...</div>', 
+                        unsafe_allow_html=True
+                    )
+
+                    # 3. Construcción del enlace de Pollinations
                     prompt_encoded = urllib.parse.quote(prompt_enriquecido)
                     seed = int(datetime.now().timestamp())
-
                     url_final_imagen = f"https://image.pollinations.ai/prompt/{prompt_encoded}?width=1024&height=1024&nologo=true&seed={seed}"
                     
-                    # Probar la URL de la imagen
-                    req = urllib.request.Request(url_final_imagen, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=25):
-                        pass
-
                     marcador_animado.image(url_final_imagen, caption=f"✨ {prompt}", use_container_width=True)
 
                     chat_activo["historial"].append({
                         "role": "assistant", 
                         "content": url_final_imagen, 
                         "tipo": "imagen",
-                        "prompt": prompt
+                        "prompt": prompt,
+                        "prompt_en": prompt_sintetizado
                     })
 
                 except Exception as e:
@@ -356,7 +392,6 @@ if not bloqueado_por_restriccion:
                 
                 mensajes_api = [{"role": "system", "content": contexto_sistema}]
                 
-                # Omitir errores pasados para evitar el desbordamiento de tokens (Error 413/429)
                 historial_reciente = chat_activo["historial"][-4:]
                 
                 for m in historial_reciente:
@@ -369,7 +404,6 @@ if not bloqueado_por_restriccion:
                     else:
                         content_texto = str(m.get("content", ""))
 
-                    # Evitar incluir bloques de errores técnicos gigantescos
                     if "🚨" in content_texto or "Traceback (most recent call last)" in content_texto or "APIStatusError" in content_texto:
                         continue
 
@@ -438,7 +472,6 @@ if not bloqueado_por_restriccion:
                     
                 chat_activo["historial"].append({"role": "assistant", "content": texto_completo})
         
-        # Guardar cambios
         base_datos_chats[usuario_actual] = st.session_state.conversaciones
         guardar_todas_las_conversaciones(base_datos_chats)
         st.rerun()
