@@ -236,7 +236,7 @@ with col_modo:
 with col_potencia:
     nivel_potencia = st.radio(
         "Nivel de procesamiento:",
-        ["⚡ Normal", "🚀 Pro (Auto-Reflexión)"],
+        ["⚡ Normal", "🚀 Pro (Doble Revisión)"],
         key="selector_potencia"
     )
 
@@ -272,7 +272,7 @@ if st.session_state.tipo_usuario == "Invitado" and mensajes_enviados >= 5:
     bloqueado_por_restriccion = True
     st.error("⚠️ Límite del Modo Invitado alcanzado.")
 
-placeholder_chat = "Escribe tu pregunta o duda..." if modo_operacion == "💬 Texto / Chat" else "Pide una imagen o solicita cambios a la anterior..."
+placeholder_chat = "Escribe tu pregunta..." if modo_operacion == "💬 Texto / Chat" else "Pide una imagen, modifica la anterior o pide una nueva (ej: 'pinta uno nuevo')..."
 
 if not bloqueado_por_restriccion:
     if prompt := st.chat_input(placeholder_chat):
@@ -305,64 +305,81 @@ if not bloqueado_por_restriccion:
             st.rerun()
 
         # ==========================================
-        # 🎨 MODO GENERAR IMAGEN (NORMAL O PRO)
+        # 🎨 MODO GENERAR IMAGEN
         # ==========================================
         elif modo_operacion == "🎨 Generar Imagen":
             with st.chat_message("assistant"):
                 
-                # 🔍 Buscar si hay memoria de una imagen anterior
+                # 🔍 DETECCIÓN DE SOLICITUD DE IMAGEN NUEVA DESDE CERO
+                patrones_nueva_imagen = [
+                    "nueva imagen", "imagen nueva", "pinta uno nuevo", "crea uno nuevo",
+                    "haz uno nuevo", "desde cero", "otra imagen", "otro dibujo", "nuevo dibujo",
+                    "crea imagen nueva", "haz una imagen nueva", "pinta algo nuevo", "haz otro"
+                ]
+                
+                quiere_imagen_nueva = any(p in prompt.lower() for p in patrones_nueva_imagen)
+                
                 ultimo_prompt_en = ""
-                for msg_h in reversed(chat_activo["historial"][:-1]):
-                    if msg_h.get("tipo") == "imagen" and msg_h.get("prompt_en"):
-                        ultimo_prompt_en = msg_h.get("prompt_en")
-                        break
+                # Solo buscamos contexto anterior si NO pidió explícitamente una imagen nueva desde cero
+                if not quiere_imagen_nueva:
+                    for msg_h in reversed(chat_activo["historial"][:-1]):
+                        if msg_h.get("tipo") == "imagen" and msg_h.get("prompt_en"):
+                            ultimo_prompt_en = msg_h.get("prompt_en")
+                            break
 
                 try:
-                    if nivel_potencia == "🚀 Pro (Auto-Reflexión)":
-                        with st.status("🚀 **Modo Pro Imagen:** Razonando composición...", expanded=True) as status:
-                            st.write("🔍 **Paso 1:** Analizando memoria contextual e intencionalidad...")
-                            time.sleep(0.3)
+                    if nivel_potencia == "🚀 Pro (Doble Revisión)":
+                        with st.status("🚀 **Modo Pro Imagen:** Razonamiento visual avanzado...", expanded=True) as status:
                             
-                            st.write("🎨 **Paso 2:** Estructurando perspectiva, estilo de render e iluminación...")
+                            st.write("🎨 **Fase 1:** Diseñando estructura y perspectiva base...")
+                            system_p1 = "You are an AI Art Director. Translate user request into a rich visual concept prompt in English. Output ONLY the prompt string."
+                            user_p1 = f"Previous Context: '{ultimo_prompt_en}'. Request: '{prompt}'" if ultimo_prompt_en else f"Request: '{prompt}'"
                             
-                            system_prompt = (
-                                "You are an elite AI Art Director. "
-                                "Analyze the user request and generate an ultra-detailed English image prompt. "
-                                "Describe environment, lighting, textures, cinematic composition, and subject precise details. "
-                                "Output ONLY the final English prompt. No markdown, no quotes."
-                            )
-                            user_prompt = f"Previous Image Context: '{ultimo_prompt_en}'\nNew User Wish: '{prompt}'" if ultimo_prompt_en else f"User Request: '{prompt}'"
-                            
-                            res_prompt = client.chat.completions.create(
+                            r1 = client.chat.completions.create(
                                 model=MODELO_TEXTO,
-                                messages=[
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}
-                                ],
+                                messages=[{"role": "system", "content": system_p1}, {"role": "user", "content": user_p1}],
                                 temperature=0.4,
-                                max_tokens=150
+                                max_tokens=120
                             )
-                            prompt_sintetizado = res_prompt.choices[0].message.content.strip().replace('"', '')
+                            prompt_v1 = r1.choices[0].message.content.strip().replace('"', '')
+
+                            st.write("🔍 **Fase 2 (Revisión 1):** Auditando composición, encuadre e iluminación...")
+                            system_p2 = "Improve this image prompt by enhancing cinematic lighting, shadow depth, camera angle, and lens detail. Output ONLY the improved prompt string."
                             
-                            st.write("✨ **Paso 3:** Perfeccionando súper-prompt para motor 8K...")
-                            status.update(label="✅ **Procesamiento Pro completado**", state="complete", expanded=False)
+                            r2 = client.chat.completions.create(
+                                model=MODELO_TEXTO,
+                                messages=[{"role": "system", "content": system_p2}, {"role": "user", "content": prompt_v1}],
+                                temperature=0.3,
+                                max_tokens=130
+                            )
+                            prompt_v2 = r2.choices[0].message.content.strip().replace('"', '')
+
+                            st.write("💎 **Fase 3 (Revisión 2):** Pulido de texturas, realismo y calidad 8K...")
+                            system_p3 = "Final polish on this art prompt: add photographic realism, materials texture, 8k resolution tags. Keep it under 80 words. Output ONLY the final prompt."
+                            
+                            r3 = client.chat.completions.create(
+                                model=MODELO_TEXTO,
+                                messages=[{"role": "system", "content": system_p3}, {"role": "user", "content": prompt_v2}],
+                                temperature=0.2,
+                                max_tokens=140
+                            )
+                            prompt_sintetizado = r3.choices[0].message.content.strip().replace('"', '')
+
+                            status.update(label="✅ **Doble revisión de imagen completada**", state="complete", expanded=False)
                     else:
                         # Modo Normal
-                        system_prompt = "Translate and combine into a clean, short English art prompt. Output ONLY prompt string."
-                        user_prompt = f"Previous Context: '{ultimo_prompt_en}'. New Request: '{prompt}'" if ultimo_prompt_en else prompt
+                        system_prompt = "Translate and combine into a clean English art prompt. Output ONLY prompt string."
+                        user_prompt = f"Previous Context: '{ultimo_prompt_en}'. Request: '{prompt}'" if ultimo_prompt_en else prompt
                         
                         res_prompt = client.chat.completions.create(
                             model=MODELO_TEXTO,
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt}
-                            ],
+                            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
                             temperature=0.3,
                             max_tokens=100
                         )
                         prompt_sintetizado = res_prompt.choices[0].message.content.strip().replace('"', '')
 
-                    # Construcción y despliegue final
+                    # Construcción del enlace
                     prompt_enriquecido = f"{prompt_sintetizado}, highly detailed, 8k resolution, masterpiece"
                     prompt_encoded = urllib.parse.quote(prompt_enriquecido)
                     seed = int(datetime.now().timestamp())
@@ -388,14 +405,13 @@ if not bloqueado_por_restriccion:
                     chat_activo["historial"].append({"role": "assistant", "content": error_formateado})
 
         # ==========================================
-        # 📝 MODO TEXTO (NORMAL O PRO CON AUTO-REFLEXIÓN)
+        # 📝 MODO TEXTO (DOBLE REVISIÓN EN MODO PRO)
         # ==========================================
         else:
             with st.chat_message("assistant"):
                 ahora = datetime.now()
                 contexto_sistema = f"Eres Isaac AI, una IA inteligente y directa. Fecha actual: {ahora.strftime('%d/%m/%Y')}."
                 
-                # Prepara contexto de mensajes
                 mensajes_api = [{"role": "system", "content": contexto_sistema}]
                 historial_reciente = chat_activo["historial"][-4:]
                 
@@ -439,44 +455,52 @@ if not bloqueado_por_restriccion:
                         st.warning(f"Error con la imagen adjunta: {e}")
 
                 try:
-                    # 🚀 LÓGICA MODO PRO (PENSAR -> REVISAR -> MEJORAR)
-                    if nivel_potencia == "🚀 Pro (Auto-Reflexión)":
-                        with st.status("🧠 **Modo Pro Razonando:** Generando y puliendo respuesta...", expanded=True) as status:
+                    # 🚀 MODO PRO CON DOBLE REVISIÓN (2 PASADAS)
+                    if nivel_potencia == "🚀 Pro (Doble Revisión)":
+                        with st.status("🧠 **Modo Pro:** Pensando, revisando (2x) y puliendo...", expanded=True) as status:
                             
-                            # PASO 1: Generar borrador preliminar
-                            st.write("✏️ **Paso 1:** Generando borrador inicial...")
+                            # PASO 1: Borrador inicial
+                            st.write("✏️ **Paso 1:** Generando respuesta borrador...")
                             res_borrador = client.chat.completions.create(
                                 model=modelo_a_usar,
                                 messages=mensajes_api,
                                 temperature=0.3,
-                                max_tokens=400
+                                max_tokens=350
                             )
-                            borrador = res_borrador.choices[0].message.content
+                            borrador_1 = res_borrador.choices[0].message.content
 
-                            # PASO 2: Auto-crítica y revisión interna
-                            st.write("🔍 **Paso 2:** Evaluando exactitud, tono y corrección de errores...")
-                            prompt_critica = [
-                                {"role": "system", "content": "Eres un auditor crítico de IA. Revisa la siguiente respuesta borrador. Identifica cualquier error lógico, omisión, imprecisión o mejora de claridad requerida. Sé breve y conciso."},
-                                {"role": "user", "content": f"Pregunta original: '{prompt}'\nRespuesta borrador: '{borrador}'"}
+                            # PASO 2: Primera Revisión y Corrección
+                            st.write("🔍 **Paso 2 (Revisión 1):** Auditando precisión, lógica y omitidos...")
+                            p_critica_1 = [
+                                {"role": "system", "content": "Eres un editor crítico. Revisa la respuesta borrador. Identifica cualquier falta de lógica, omisión o imprecisión. Sé breve."},
+                                {"role": "user", "content": f"Pregunta: '{prompt}'\nBorrador: '{borrador_1}'"}
                             ]
-                            res_critica = client.chat.completions.create(
-                                model=MODELO_TEXTO,
-                                messages=prompt_critica,
-                                temperature=0.2,
-                                max_tokens=200
-                            )
-                            critica = res_critica.choices[0].message.content
+                            c1 = client.chat.completions.create(model=MODELO_TEXTO, messages=p_critica_1, temperature=0.2, max_tokens=150).choices[0].message.content
 
-                            # PASO 3: Redacción final pulida
-                            st.write("💎 **Paso 3:** Reescritura y optimización final...")
+                            st.write("🔧 **Paso 3:** Aplicando primera ronda de mejoras...")
+                            p_mejora_1 = mensajes_api + [
+                                {"role": "assistant", "content": borrador_1},
+                                {"role": "user", "content": f"Aplica estas correcciones a la respuesta: {c1}"}
+                            ]
+                            borrador_2 = client.chat.completions.create(model=modelo_a_usar, messages=p_mejora_1, temperature=0.3, max_tokens=350).choices[0].message.content
+
+                            # PASO 3: Segunda Revisión y Pulido Final
+                            st.write("🔎 **Paso 4 (Revisión 2):** Auditando claridad, tono y fluidez final...")
+                            p_critica_2 = [
+                                {"role": "system", "content": "Eres un experto en redacción. Revisa este texto mejorado y da sugerencias para maximizar su claridad, concisión y utilidad."},
+                                {"role": "user", "content": f"Pregunta original: '{prompt}'\nTexto mejorado: '{borrador_2}'"}
+                            ]
+                            c2 = client.chat.completions.create(model=MODELO_TEXTO, messages=p_critica_2, temperature=0.2, max_tokens=150).choices[0].message.content
+
+                            st.write("💎 **Paso 5:** Generando versión final perfeccionada...")
                             prompt_final = mensajes_api + [
-                                {"role": "assistant", "content": borrador},
-                                {"role": "user", "content": f"Por favor reescribe la respuesta final perfeccionándola con base en esta autocrítica: {critica}"}
+                                {"role": "assistant", "content": borrador_2},
+                                {"role": "user", "content": f"Reescribe la respuesta final perfeccionándola con esta última revisión de calidad: {c2}"}
                             ]
                             
-                            status.update(label="✅ **Pensamiento Pro completado**", state="complete", expanded=False)
+                            status.update(label="✅ **Doble revisión Pro completada**", state="complete", expanded=False)
 
-                        # Mostrar respuesta final en streaming
+                        # Salida final
                         marcador_texto = st.empty()
                         texto_completo = ""
                         stream = client.chat.completions.create(
@@ -495,7 +519,7 @@ if not bloqueado_por_restriccion:
                                     time.sleep(0.01)
                         marcador_texto.markdown(texto_completo)
 
-                    # ⚡ LÓGICA MODO NORMAL (RESPUESTA DIRECTA)
+                    # ⚡ MODO NORMAL
                     else:
                         marcador_texto = st.empty()
                         texto_completo = ""
