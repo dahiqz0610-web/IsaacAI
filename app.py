@@ -164,7 +164,6 @@ if not st.session_state.autenticado:
                 if es_correo_valido(correo_limpio):
                     st.session_state.correo_pendiente = correo_limpio
                     
-                    # Si el correo ya tiene perfil con contraseña
                     if correo_limpio in db_usuarios and db_usuarios[correo_limpio].get("password"):
                         st.session_state.paso_login = "pedir_password"
                     else:
@@ -260,7 +259,6 @@ if not st.session_state.autenticado:
                         }
                         guardar_usuarios(db_usuarios)
                         
-                        # Guardar sesión permanente en URL
                         st.query_params["user"] = correo_user
                         
                         st.session_state.autenticado = True
@@ -317,7 +315,7 @@ if ("chat_actual_id" not in st.session_state or
     st.session_state.chat_actual_id = list(st.session_state.conversaciones.keys())[0]
 
 # ==========================================
-# 💾 BARRA LATERAL CON BOTÓN DE CAMBIAR CUENTA
+# 💾 BARRA LATERAL
 # ==========================================
 with st.sidebar:
     st.write(f"### 👤 {st.session_state.usuario_info}")
@@ -359,7 +357,6 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # --- BOTÓN PARA CAMBIAR DE CUENTA ---
     if st.button("🔄 Cambiar de Cuenta / Salir", use_container_width=True):
         st.query_params.clear()
         st.session_state.clear()
@@ -371,9 +368,13 @@ with st.sidebar:
 chat_activo = st.session_state.conversaciones[st.session_state.chat_actual_id]
 st.title(f"{chat_activo['titulo']}")
 
+# Mostrar el historial de la conversación
 for msg in chat_activo["historial"]:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        if msg.get("type") == "image":
+            st.image(msg["content"], caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
+        else:
+            st.markdown(msg["content"])
 
 mensajes_enviados = sum(1 for m in chat_activo["historial"] if m["role"] == "user")
 bloqueado_por_restriccion = st.session_state.tipo_usuario == "Invitado" and mensajes_enviados >= 5
@@ -382,56 +383,111 @@ if bloqueado_por_restriccion:
     st.error("⚠️ Límite del Modo Invitado alcanzado. Inicia sesión para continuar.")
 
 if not bloqueado_por_restriccion:
-    if prompt := st.chat_input("Escribe tu pregunta..."):
+    
+    # ----------------------------------------------------
+    # 🎛️ CONTROLES UBICADOS JUSTO ENCIMA DEL CHAT INPUT
+    # ----------------------------------------------------
+    col_pro, col_img = st.columns([0.5, 0.5])
+    with col_pro:
+        modo_pro = st.toggle("⚡ Modo Pro (Alta precisión)", value=False, key="toggle_pro")
+    with col_img:
+        modo_imagen = st.toggle("🎨 Generar Imagen", value=False, key="toggle_imagen")
+
+    # Adaptar la etiqueta del cuadro según el modo activo
+    if modo_imagen:
+        texto_placeholder = "Escribe qué imagen deseas crear..."
+    elif modo_pro:
+        texto_placeholder = "Modo Pro activo: escribe tu consulta detallada..."
+    else:
+        texto_placeholder = "Escribe tu mensaje..."
+
+    # Cuadro de entrada
+    if prompt := st.chat_input(texto_placeholder):
         
+        # 1. Registrar mensaje del usuario
         with st.chat_message("user"):
             st.markdown(prompt)
-        chat_activo["historial"].append({"role": "user", "content": prompt})
+        chat_activo["historial"].append({"role": "user", "content": prompt, "type": "text"})
         
         if len(chat_activo["historial"]) == 1:
             chat_activo["titulo"] = prompt[:30].strip() + ("..." if len(prompt) > 30 else "")
 
+        # 2. Generar respuesta del asistente
         with st.chat_message("assistant"):
-            ahora = datetime.now()
-            contexto_sistema = f"Eres Isaac AI, una IA inteligente y directa. Fecha actual: {ahora.strftime('%d/%m/%Y')}."
             
-            mensajes_api = [{"role": "system", "content": contexto_sistema}]
+            # --- MODO GENERAR IMAGEN ---
+            if modo_imagen:
+                with st.spinner("🎨 Creando imagen con IA..."):
+                    prompt_encoded = urllib.parse.quote(prompt)
+                    seed_random = random.randint(1, 999999)
+                    url_imagen = f"https://pollinations.ai/p/{prompt_encoded}?width=1024&height=1024&seed={seed_random}&nologo=true"
+                    
+                    st.image(url_imagen, caption=f"🖼️ {prompt}")
+                    chat_activo["historial"].append({
+                        "role": "assistant",
+                        "content": url_imagen,
+                        "caption": prompt,
+                        "type": "image"
+                    })
             
-            for m in chat_activo["historial"][-5:]:
-                role = m.get("role")
-                content_texto = str(m.get("content", ""))
-                if role in ["user", "assistant"] and content_texto.strip():
-                    if mensajes_api[-1]["role"] == role:
-                        mensajes_api[-1]["content"] += "\n" + content_texto
-                    else:
-                        mensajes_api.append({"role": role, "content": content_texto})
+            # --- MODO TEXTO (Normal o Pro) ---
+            else:
+                ahora = datetime.now()
+                
+                if modo_pro:
+                    contexto_sistema = (
+                        f"Eres Isaac AI en MODO PRO. Fecha actual: {ahora.strftime('%d/%m/%Y')}. "
+                        "Ofrece respuestas minuciosas, con análisis profundo, explicaciones paso a paso y excelente estructuración."
+                    )
+                    max_tokens_val = 2000
+                    temp_val = 0.2
+                else:
+                    contexto_sistema = (
+                        f"Eres Isaac AI, una IA inteligente, rápida y directa. "
+                        f"Fecha actual: {ahora.strftime('%d/%m/%Y')}."
+                    )
+                    max_tokens_val = 800
+                    temp_val = 0.4
+                
+                mensajes_api = [{"role": "system", "content": contexto_sistema}]
+                
+                # Filtrar solo mensajes de texto para la API de IA
+                mensajes_texto = [m for m in chat_activo["historial"] if m.get("type", "text") == "text"]
+                for m in mensajes_texto[-6:]:
+                    role = m.get("role")
+                    content_texto = str(m.get("content", ""))
+                    if role in ["user", "assistant"] and content_texto.strip():
+                        if mensajes_api[-1]["role"] == role:
+                            mensajes_api[-1]["content"] += "\n" + content_texto
+                        else:
+                            mensajes_api.append({"role": role, "content": content_texto})
 
-            try:
-                marcador_texto = st.empty()
-                texto_completo = ""
-                
-                stream = client.chat.completions.create(
-                    model=MODELO_TEXTO,
-                    messages=mensajes_api,
-                    stream=True,
-                    temperature=0.3,
-                    max_tokens=800
-                )
-                
-                for parte in stream:
-                    contenido = parte.choices[0].delta.content if parte.choices and parte.choices[0].delta else None
-                    if contenido:
-                        texto_completo += contenido
-                        marcador_texto.markdown(texto_completo + "▌")
-                        time.sleep(0.005)
-                        
-                marcador_texto.markdown(texto_completo)
+                try:
+                    marcador_texto = st.empty()
+                    texto_completo = ""
+                    
+                    stream = client.chat.completions.create(
+                        model=MODELO_TEXTO,
+                        messages=mensajes_api,
+                        stream=True,
+                        temperature=temp_val,
+                        max_tokens=max_tokens_val
+                    )
+                    
+                    for parte in stream:
+                        contenido = parte.choices[0].delta.content if parte.choices and parte.choices[0].delta else None
+                        if contenido:
+                            texto_completo += contenido
+                            marcador_texto.markdown(texto_completo + "▌")
+                            time.sleep(0.005)
+                            
+                    marcador_texto.markdown(texto_completo)
 
-            except Exception as e:
-                texto_completo = f"🚨 **Error de API:** {e}"
-                st.markdown(texto_completo)
-                
-            chat_activo["historial"].append({"role": "assistant", "content": texto_completo})
+                except Exception as e:
+                    texto_completo = f"🚨 **Error de API:** {e}"
+                    st.markdown(texto_completo)
+                    
+                chat_activo["historial"].append({"role": "assistant", "content": texto_completo, "type": "text"})
     
         base_datos_chats[usuario_actual] = st.session_state.conversaciones
         guardar_todas_las_conversaciones(base_datos_chats)
