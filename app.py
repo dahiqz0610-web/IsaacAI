@@ -79,9 +79,6 @@ def es_correo_valido(correo: str) -> bool:
     return bool(re.match(patron, correo.strip().lower()))
 
 def enviar_email_otp(correo_destino, codigo_otp):
-    """
-    Envía el código OTP a través del servidor SMTP de Gmail.
-    """
     smtp_server = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(st.secrets.get("SMTP_PORT", 587))
     smtp_user = st.secrets.get("SMTP_USER", "")
@@ -117,6 +114,21 @@ def enviar_email_otp(correo_destino, codigo_otp):
     except Exception as e:
         return False, f"Error al enviar el correo: {e}"
 
+def obtener_imagen_bytes(prompt_texto):
+    """
+    Descarga la imagen directamente en formato de bytes para evitar enlaces rotos.
+    """
+    prompt_encoded = urllib.parse.quote(prompt_texto)
+    seed_random = random.randint(1, 999999)
+    url = f"https://image.pollinations.ai/prompt/{prompt_encoded}?width=1024&height=1024&seed={seed_random}&nologo=true"
+    
+    req = urllib.request.Request(
+        url, 
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    )
+    with urllib.request.urlopen(req) as response:
+        return response.read()
+
 # ==========================================
 # 🔐 GESTIÓN DE SESIÓN, AUTO-LOGIN Y REGISTRO
 # ==========================================
@@ -127,7 +139,6 @@ if "autenticado" not in st.session_state:
     st.session_state.tipo_usuario = None  
     st.session_state.usuario_info = ""
 
-# --- AUTO-LOGIN AL ENTRAR O RECARGAR ---
 if not st.session_state.autenticado and "user" in st.query_params:
     user_guardado = st.query_params["user"]
     if user_guardado in db_usuarios:
@@ -145,7 +156,6 @@ if "otp_generado" not in st.session_state:
 if "datos_registro_temp" not in st.session_state:
     st.session_state.datos_registro_temp = {}
 
-# --- INTERFAZ DE INICIO DE SESIÓN ---
 if not st.session_state.autenticado:
     st.title("🤖 Bienvenido a Isaac AI")
     
@@ -153,7 +163,6 @@ if not st.session_state.autenticado:
     
     if opcion_acceso == "Ingresar / Registrarse con Gmail":
         
-        # PASO 1: Ingresar Correo
         if st.session_state.paso_login == "ingresar_correo":
             st.write("### Acceso con Correo Gmail")
             
@@ -172,7 +181,6 @@ if not st.session_state.autenticado:
                 else:
                     st.error("Por favor ingresa una dirección válida terminada en @gmail.com")
 
-        # PASO 2A: Usuario existente -> Solicitar contraseña
         elif st.session_state.paso_login == "pedir_password":
             correo_user = st.session_state.correo_pendiente
             nombre_registrado = db_usuarios[correo_user].get("nombre", "Usuario")
@@ -206,7 +214,6 @@ if not st.session_state.autenticado:
                     st.session_state.paso_login = "ingresar_correo"
                     st.rerun()
 
-        # PASO 2B: Registro de nuevo perfil
         elif st.session_state.paso_login == "crear_perfil":
             correo_user = st.session_state.correo_pendiente
             st.write(f"### Configura tu perfil para `{correo_user}`")
@@ -233,7 +240,6 @@ if not st.session_state.autenticado:
                 else:
                     st.error("Por favor ingresa un nombre para continuar.")
 
-        # PASO 3: Confirmación de Código OTP
         elif st.session_state.paso_login == "verificar_codigo":
             datos_temp = st.session_state.datos_registro_temp
 
@@ -372,7 +378,12 @@ st.title(f"{chat_activo['titulo']}")
 for msg in chat_activo["historial"]:
     with st.chat_message(msg["role"]):
         if msg.get("type") == "image":
-            st.image(msg["content"], caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
+            # Convertir base64 o bytes si existen
+            img_data = msg.get("bytes")
+            if img_data:
+                st.image(img_data, caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
+            else:
+                st.image(msg["content"], caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
         else:
             st.markdown(msg["content"])
 
@@ -384,16 +395,12 @@ if bloqueado_por_restriccion:
 
 if not bloqueado_por_restriccion:
     
-    # ----------------------------------------------------
-    # 🎛️ CONTROLES UBICADOS JUSTO ENCIMA DEL CHAT INPUT
-    # ----------------------------------------------------
     col_pro, col_img = st.columns([0.5, 0.5])
     with col_pro:
         modo_pro = st.toggle("⚡ Modo Pro (Alta precisión)", value=False, key="toggle_pro")
     with col_img:
         modo_imagen = st.toggle("🎨 Generar Imagen", value=False, key="toggle_imagen")
 
-    # Adaptar la etiqueta del cuadro según el modo activo
     if modo_imagen:
         texto_placeholder = "Escribe qué imagen deseas crear..."
     elif modo_pro:
@@ -401,10 +408,8 @@ if not bloqueado_por_restriccion:
     else:
         texto_placeholder = "Escribe tu mensaje..."
 
-    # Cuadro de entrada
     if prompt := st.chat_input(texto_placeholder):
         
-        # 1. Registrar mensaje del usuario
         with st.chat_message("user"):
             st.markdown(prompt)
         chat_activo["historial"].append({"role": "user", "content": prompt, "type": "text"})
@@ -412,25 +417,26 @@ if not bloqueado_por_restriccion:
         if len(chat_activo["historial"]) == 1:
             chat_activo["titulo"] = prompt[:30].strip() + ("..." if len(prompt) > 30 else "")
 
-        # 2. Generar respuesta del asistente
         with st.chat_message("assistant"):
             
-            # --- MODO GENERAR IMAGEN ---
+            # --- GENERAR IMAGEN EN BYTES DIRECTOS ---
             if modo_imagen:
                 with st.spinner("🎨 Creando imagen con IA..."):
-                    prompt_encoded = urllib.parse.quote(prompt)
-                    seed_random = random.randint(1, 999999)
-                    url_imagen = f"https://pollinations.ai/p/{prompt_encoded}?width=1024&height=1024&seed={seed_random}&nologo=true"
-                    
-                    st.image(url_imagen, caption=f"🖼️ {prompt}")
-                    chat_activo["historial"].append({
-                        "role": "assistant",
-                        "content": url_imagen,
-                        "caption": prompt,
-                        "type": "image"
-                    })
+                    try:
+                        bytes_img = obtener_imagen_bytes(prompt)
+                        st.image(bytes_img, caption=f"🖼️ {prompt}")
+                        
+                        chat_activo["historial"].append({
+                            "role": "assistant",
+                            "content": prompt,
+                            "bytes": bytes_img,
+                            "caption": prompt,
+                            "type": "image"
+                        })
+                    except Exception as err:
+                        st.error(f"Error al generar la imagen: {err}")
             
-            # --- MODO TEXTO (Normal o Pro) ---
+            # --- MODO TEXTO ---
             else:
                 ahora = datetime.now()
                 
@@ -451,7 +457,6 @@ if not bloqueado_por_restriccion:
                 
                 mensajes_api = [{"role": "system", "content": contexto_sistema}]
                 
-                # Filtrar solo mensajes de texto para la API de IA
                 mensajes_texto = [m for m in chat_activo["historial"] if m.get("type", "text") == "text"]
                 for m in mensajes_texto[-6:]:
                     role = m.get("role")
