@@ -118,12 +118,23 @@ def enviar_email_otp(correo_destino, codigo_otp):
         return False, f"Error al enviar el correo: {e}"
 
 # ==========================================
-# 🔐 GESTIÓN DE SESIÓN Y REGISTRO/LOGIN
+# 🔐 GESTIÓN DE SESIÓN, AUTO-LOGIN Y REGISTRO
 # ==========================================
+db_usuarios = cargar_usuarios()
+
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
     st.session_state.tipo_usuario = None  
     st.session_state.usuario_info = ""
+
+# --- AUTO-LOGIN AL ENTRAR O RECARGAR ---
+if not st.session_state.autenticado and "user" in st.query_params:
+    user_guardado = st.query_params["user"]
+    if user_guardado in db_usuarios:
+        nombre_u = db_usuarios[user_guardado].get("nombre", "Usuario")
+        st.session_state.autenticado = True
+        st.session_state.tipo_usuario = "Privilegiado"
+        st.session_state.usuario_info = f"{nombre_u} ({user_guardado})"
 
 if "paso_login" not in st.session_state:
     st.session_state.paso_login = "ingresar_correo"
@@ -134,8 +145,7 @@ if "otp_generado" not in st.session_state:
 if "datos_registro_temp" not in st.session_state:
     st.session_state.datos_registro_temp = {}
 
-db_usuarios = cargar_usuarios()
-
+# --- INTERFAZ DE INICIO DE SESIÓN ---
 if not st.session_state.autenticado:
     st.title("🤖 Bienvenido a Isaac AI")
     
@@ -250,6 +260,9 @@ if not st.session_state.autenticado:
                         }
                         guardar_usuarios(db_usuarios)
                         
+                        # Guardar sesión permanente en URL
+                        st.query_params["user"] = correo_user
+                        
                         st.session_state.autenticado = True
                         st.session_state.tipo_usuario = "Privilegiado"
                         st.session_state.usuario_info = f"{datos_temp['nombre']} ({correo_user})"
@@ -304,7 +317,7 @@ if ("chat_actual_id" not in st.session_state or
     st.session_state.chat_actual_id = list(st.session_state.conversaciones.keys())[0]
 
 # ==========================================
-# 💾 BARRA LATERAL
+# 💾 BARRA LATERAL CON BOTÓN DE CAMBIAR CUENTA
 # ==========================================
 with st.sidebar:
     st.write(f"### 👤 {st.session_state.usuario_info}")
@@ -345,7 +358,10 @@ with st.sidebar:
                     st.rerun()
 
     st.markdown("---")
-    if st.button("🔒 Cerrar Sesión", use_container_width=True):
+    
+    # --- BOTÓN PARA CAMBIAR DE CUENTA ---
+    if st.button("🔄 Cambiar de Cuenta / Salir", use_container_width=True):
+        st.query_params.clear()
         st.session_state.clear()
         st.rerun()
 
