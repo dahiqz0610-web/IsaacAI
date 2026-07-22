@@ -80,35 +80,42 @@ def es_correo_valido(correo: str) -> bool:
 
 def enviar_email_otp(correo_destino, codigo_otp):
     """
-    Intenta enviar correo si hay credenciales SMTP en secrets.
-    Si no las hay, activa el modo de prueba (gratis y visual en pantalla).
+    Envía el código OTP a través del servidor SMTP de Gmail.
     """
     smtp_server = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(st.secrets.get("SMTP_PORT", 587))
     smtp_user = st.secrets.get("SMTP_USER", "")
     smtp_password = st.secrets.get("SMTP_PASSWORD", "")
 
-    if smtp_user and smtp_password:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = smtp_user
-            msg['To'] = correo_destino
-            msg['Subject'] = f"{codigo_otp} es tu código de verificación para Isaac AI"
-            
-            cuerpo = f"Tu código de acceso de 6 dígitos es: {codigo_otp}"
-            msg.attach(MIMEText(cuerpo, 'plain'))
+    if not smtp_user or not smtp_password:
+        return False, "⚠️ No has configurado las credenciales de Gmail en los Secrets."
 
-            server = smtplib.SMTP(smtp_server, smtp_port)
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.sendmail(smtp_user, correo_destino, msg.as_string())
-            server.quit()
-            return True, "Correo enviado correctamente a tu bandeja de entrada.", False
-        except Exception as e:
-            return False, f"Error SMTP: {e}", True
-    else:
-        # Modo de prueba 100% gratuito sin enviar correos reales aún
-        return True, "Modo de prueba activo (Sin SMTP configurado)", True
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = f"Isaac AI <{smtp_user}>"
+        msg['To'] = correo_destino
+        msg['Subject'] = f"{codigo_otp} - Tu código de verificación de Isaac AI"
+        
+        cuerpo_mensaje = f"""
+        Hola,
+
+        Tu código de verificación para ingresar a Isaac AI es:
+        
+        👉  {codigo_otp}  👈
+        
+        Si no solicitaste este código, ignora este mensaje.
+        """
+        msg.attach(MIMEText(cuerpo_mensaje, 'plain'))
+
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(smtp_user, smtp_password)
+        server.sendmail(smtp_user, correo_destino, msg.as_string())
+        server.quit()
+        
+        return True, f"Correo enviado exitosamente a {correo_destino}."
+    except Exception as e:
+        return False, f"Error al enviar el correo: {e}"
 
 # ==========================================
 # 🔐 GESTIÓN DE SESIÓN Y REGISTRO/LOGIN
@@ -136,27 +143,27 @@ if not st.session_state.autenticado:
     
     if opcion_acceso == "Ingresar / Registrarse con Gmail":
         
-        # PASO 1: Correo electrónico
+        # PASO 1: Ingresar Correo
         if st.session_state.paso_login == "ingresar_correo":
             st.write("### Acceso con Correo Gmail")
             
-            correo = st.text_input("Introduce tu correo (@gmail.com):", placeholder="ejemplo@gmail.com")
+            correo = st.text_input("Introduce tu correo (@gmail.com):", placeholder="tu_correo@gmail.com")
             correo_limpio = correo.strip().lower()
             
             if st.button("Continuar", use_container_width=True):
                 if es_correo_valido(correo_limpio):
                     st.session_state.correo_pendiente = correo_limpio
                     
-                    # Verificar si existe en la base de usuarios registrada
+                    # Si el correo ya tiene perfil con contraseña
                     if correo_limpio in db_usuarios and db_usuarios[correo_limpio].get("password"):
                         st.session_state.paso_login = "pedir_password"
                     else:
                         st.session_state.paso_login = "crear_perfil"
                     st.rerun()
                 else:
-                    st.error("Por favor ingresa un correo terminado en @gmail.com")
+                    st.error("Por favor ingresa una dirección válida terminada en @gmail.com")
 
-        # PASO 2A: Si el usuario ya existe y configuró contraseña previamente
+        # PASO 2A: Usuario existente -> Solicitar contraseña
         elif st.session_state.paso_login == "pedir_password":
             correo_user = st.session_state.correo_pendiente
             nombre_registrado = db_usuarios[correo_user].get("nombre", "Usuario")
@@ -167,7 +174,7 @@ if not st.session_state.autenticado:
             col_login, col_cambiar = st.columns([0.7, 0.3])
             
             with col_login:
-                if st.button("Iniciar Sesión", use_container_width=True):
+                if st.button("Verificar e Ingresar", use_container_width=True):
                     if password_input == db_usuarios[correo_user]["password"]:
                         otp = str(random.randint(100000, 999999))
                         st.session_state.otp_generado = otp
@@ -175,8 +182,13 @@ if not st.session_state.autenticado:
                             "correo": correo_user,
                             "nombre": nombre_registrado
                         }
-                        st.session_state.paso_login = "verificar_codigo"
-                        st.rerun()
+                        
+                        exito, msj = enviar_email_otp(correo_user, otp)
+                        if exito:
+                            st.session_state.paso_login = "verificar_codigo"
+                            st.rerun()
+                        else:
+                            st.error(msj)
                     else:
                         st.error("Contraseña incorrecta.")
             
@@ -185,16 +197,15 @@ if not st.session_state.autenticado:
                     st.session_state.paso_login = "ingresar_correo"
                     st.rerun()
 
-        # PASO 2B: Si el correo es nuevo o no tiene contraseña registrada
+        # PASO 2B: Registro de nuevo perfil
         elif st.session_state.paso_login == "crear_perfil":
             correo_user = st.session_state.correo_pendiente
             st.write(f"### Configura tu perfil para `{correo_user}`")
-            st.caption("Asigna tu nombre y una contraseña personal para proteger tu cuenta.")
             
             nombre = st.text_input("Tu Nombre o Apodo:", placeholder="Ej. Isaac")
-            password = st.text_input("Crea una Contraseña (Opcional, déjala en blanco si prefieres sin clave):", type="password")
+            password = st.text_input("Crea una Contraseña (Opcional, déjala vacía si prefieres entrar libre):", type="password")
             
-            if st.button("Enviar Código por Gmail", use_container_width=True):
+            if st.button("Enviar Código a mi Gmail", use_container_width=True):
                 if nombre.strip():
                     otp = str(random.randint(100000, 999999))
                     st.session_state.otp_generado = otp
@@ -203,31 +214,28 @@ if not st.session_state.autenticado:
                         "nombre": nombre.strip(),
                         "password": password.strip()
                     }
-                    st.session_state.paso_login = "verificar_codigo"
-                    st.rerun()
+                    
+                    exito, msj = enviar_email_otp(correo_user, otp)
+                    if exito:
+                        st.session_state.paso_login = "verificar_codigo"
+                        st.rerun()
+                    else:
+                        st.error(msj)
                 else:
-                    st.error("Por favor ingresa tu nombre.")
+                    st.error("Por favor ingresa un nombre para continuar.")
 
-        # PASO 3: Verificación del código enviado por correo
+        # PASO 3: Confirmación de Código OTP
         elif st.session_state.paso_login == "verificar_codigo":
             datos_temp = st.session_state.datos_registro_temp
-            exito_smtp, msj_smtp, es_modo_dev = enviar_email_otp(
-                datos_temp["correo"], 
-                st.session_state.otp_generado
-            )
 
             st.markdown(f"""
             <div class="caja-otp">
-                📧 Código de verificación para: <b>{datos_temp['correo']}</b><br>
+                📧 Enviamos un código de 6 dígitos a: <b>{datos_temp['correo']}</b><br>
                 👤 Usuario: <b>{datos_temp['nombre']}</b>
             </div>
             """, unsafe_allow_html=True)
 
-            if es_modo_dev:
-                st.info(f"🔑 **Código de prueba:** `{st.session_state.otp_generado}` *(Cópialo e ingrésalo abajo)*")
-            else:
-                st.success("Se ha enviado un código a tu cuenta de Gmail.")
-            
+            st.info("Revisa tu bandeja de entrada o la carpeta de **Spam / Correo no deseado**.")
             codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos:", max_chars=6)
             
             col_validar, col_volver = st.columns([0.7, 0.3])
@@ -235,7 +243,6 @@ if not st.session_state.autenticado:
             with col_validar:
                 if st.button("Confirmar e Iniciar Sesión", use_container_width=True):
                     if codigo_ingresado.strip() == st.session_state.otp_generado:
-                        # Guardar perfil de usuario
                         correo_user = datos_temp["correo"]
                         db_usuarios[correo_user] = {
                             "nombre": datos_temp["nombre"],
@@ -247,10 +254,10 @@ if not st.session_state.autenticado:
                         st.session_state.tipo_usuario = "Privilegiado"
                         st.session_state.usuario_info = f"{datos_temp['nombre']} ({correo_user})"
                         st.session_state.paso_login = "ingresar_correo"
-                        st.success("¡Bienvenido!")
+                        st.success("¡Inicio de sesión exitoso!")
                         st.rerun()
                     else:
-                        st.error("El código ingresado es incorrecto.")
+                        st.error("Código incorrecto. Verifica los números ingresados.")
             
             with col_volver:
                 if st.button("Volver", use_container_width=True):
