@@ -115,9 +115,6 @@ def enviar_email_otp(correo_destino, codigo_otp):
         return False, f"Error al enviar el correo: {e}"
 
 def obtener_imagen_bytes(prompt_texto):
-    """
-    Descarga la imagen directamente en formato de bytes para evitar enlaces rotos.
-    """
     prompt_encoded = urllib.parse.quote(prompt_texto)
     seed_random = random.randint(1, 999999)
     url = f"https://image.pollinations.ai/prompt/{prompt_encoded}?width=1024&height=1024&seed={seed_random}&nologo=true"
@@ -378,12 +375,12 @@ st.title(f"{chat_activo['titulo']}")
 for msg in chat_activo["historial"]:
     with st.chat_message(msg["role"]):
         if msg.get("type") == "image":
-            # Convertir base64 o bytes si existen
-            img_data = msg.get("bytes")
-            if img_data:
-                st.image(img_data, caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
+            b64_data = msg.get("b64")
+            if b64_data:
+                bytes_decodificados = base64.b64decode(b64_data)
+                st.image(bytes_decodificados, caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
             else:
-                st.image(msg["content"], caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
+                st.image(msg.get("content", ""), caption=f"🖼️ {msg.get('caption', 'Imagen generada')}")
         else:
             st.markdown(msg["content"])
 
@@ -419,17 +416,19 @@ if not bloqueado_por_restriccion:
 
         with st.chat_message("assistant"):
             
-            # --- GENERAR IMAGEN EN BYTES DIRECTOS ---
+            # --- GENERAR IMAGEN EN BASE64 ---
             if modo_imagen:
                 with st.spinner("🎨 Creando imagen con IA..."):
                     try:
                         bytes_img = obtener_imagen_bytes(prompt)
+                        b64_str = base64.b64encode(bytes_img).decode("utf-8")
+                        
                         st.image(bytes_img, caption=f"🖼️ {prompt}")
                         
                         chat_activo["historial"].append({
                             "role": "assistant",
                             "content": prompt,
-                            "bytes": bytes_img,
+                            "b64": b64_str,
                             "caption": prompt,
                             "type": "image"
                         })
