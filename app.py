@@ -43,6 +43,7 @@ st.markdown("""
 # CONFIGURACIÓN DE ARCHIVOS Y PERSISTENCIA
 # ==========================================
 ARCHIVO_CHATS_PERMANENTE = "historial_chats.json"
+NUMERO_REMITENTE_OFICIAL = "+50662457838"  # Número configurado para envíos
 
 def cargar_todas_las_conversaciones():
     if os.path.exists(ARCHIVO_CHATS_PERMANENTE):
@@ -57,22 +58,21 @@ def guardar_todas_las_conversaciones(datos_totales):
     with open(ARCHIVO_CHATS_PERMANENTE, "w", encoding="utf-8") as f:
         json.dump(datos_totales, f, indent=4, ensure_ascii=False)
 
-def es_telefono_valido(telefono: str) -> bool:
-    """Valida que contenga entre 8 y 15 dígitos (con o sin código de país +)"""
-    limpio = telefono.strip().replace(" ", "").replace("-", "")
-    patron = r'^\+?[0-9]{8,15}$'
+def es_telefono_valido(telefono_completo: str) -> bool:
+    """Valida que el número tenga formato internacional (+506...) y suficientes dígitos"""
+    limpio = telefono_completo.strip().replace(" ", "").replace("-", "")
+    patron = r'^\+[0-9]{8,15}$'
     return bool(re.match(patron, limpio))
 
 def enviar_sms_otp(numero_destino, codigo_otp):
     """
-    Si tienes credenciales de Twilio configuradas en st.secrets las usará.
-    Si no, entra en modo desarrollo para probar el flujo sin costo.
+    Usa Twilio si las claves están en secrets. Si no, activa el modo prueba.
     """
     twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID", "")
     twilio_token = st.secrets.get("TWILIO_AUTH_TOKEN", "")
-    twilio_number = st.secrets.get("TWILIO_PHONE_NUMBER", "")
+    twilio_number = st.secrets.get("TWILIO_PHONE_NUMBER", NUMERO_REMITENTE_OFICIAL)
 
-    if twilio_sid and twilio_token and twilio_number:
+    if twilio_sid and twilio_token:
         try:
             from twilio.rest import Client
             client = Client(twilio_sid, twilio_token)
@@ -81,12 +81,12 @@ def enviar_sms_otp(numero_destino, codigo_otp):
                 from_=twilio_number,
                 to=numero_destino
             )
-            return True, "SMS enviado correctamente a tu celular.", False
+            return True, f"SMS enviado exitosamente desde {twilio_number}.", False
         except Exception as e:
             return False, f"Error al enviar SMS: {e}", True
     else:
-        # Modo de prueba cuando no hay API de SMS configurada
-        return True, "Modo de prueba activo (Sin servicio SMS de pago)", True
+        # Modo de prueba visual
+        return True, "Modo de prueba activo (Sin servicio SMS configurado)", True
 
 # ==========================================
 # 🔐 GESTIÓN DE SESIÓN Y VERIFICACIÓN SMS
@@ -113,22 +113,46 @@ if not st.session_state.autenticado:
     
     if opcion_acceso == "Ingresar con Teléfono (SMS)":
         
-        # PASO 1: Ingresar número de teléfono
+        # PASO 1: Seleccionar código de país e ingresar número
         if st.session_state.paso_login == "ingresar_telefono":
-            telefono = st.text_input(
-                "Introduce tu número de celular:", 
-                placeholder="Ejemplo: +50688888888 o 88888888"
-            )
+            st.write("### Inicia sesión con tu móvil")
+            
+            col_codigo, col_numero = st.columns([0.4, 0.6])
+            
+            with col_codigo:
+                opcion_pais = st.selectbox(
+                    "Código de País:",
+                    [
+                        "+506 (Costa Rica)",
+                        "+1 (EE.UU. / Canadá)",
+                        "+52 (México)",
+                        "+34 (España)",
+                        "+57 (Colombia)",
+                        "+54 (Argentina)",
+                        "Otro (Manual)"
+                    ],
+                    index=0
+                )
+                
+                if "Otro" in opcion_pais:
+                    prefijo = st.text_input("Escribe el código:", value="+")
+                else:
+                    prefijo = opcion_pais.split(" ")[0]
+
+            with col_numero:
+                numero_local = st.text_input("Número de celular:", placeholder="62457838")
+            
+            telefono_completo = f"{prefijo}{numero_local.strip().replace(' ', '')}"
             
             if st.button("Enviar Código por SMS", use_container_width=True):
-                if es_telefono_valido(telefono):
+                if es_telefono_valido(telefono_completo) and len(numero_local.strip()) >= 7:
                     otp = str(random.randint(100000, 999999))
                     st.session_state.otp_generado = otp
-                    st.session_state.telefono_pendiente = telefono.strip()
+                    st.session_state.telefono_pendiente = telefono_completo
                     st.session_state.paso_login = "verificar_codigo"
                     st.rerun()
                 else:
-                    st.error("Número de teléfono inválido. Debe tener al menos 8 dígitos.")
+                    st.error("Número inválido. Asegúrate de ingresar dígitos válidos.")
         
         # PASO 2: Ingresar código de 6 dígitos
         elif st.session_state.paso_login == "verificar_codigo":
@@ -139,15 +163,15 @@ if not st.session_state.autenticado:
 
             st.markdown(f"""
             <div class="caja-otp">
-                📱 Solicitud de SMS para el número: <b>{st.session_state.telefono_pendiente}</b>
+                📱 Solicitud enviada desde el número: <b>+506 6245 7838</b><br>
+                📩 Destino: <b>{st.session_state.telefono_pendiente}</b>
             </div>
             """, unsafe_allow_html=True)
 
-            # En modo de prueba te muestra el código en pantalla para avanzar rápido
             if es_modo_dev:
-                st.info(f"🔑 **Código de prueba:** `{st.session_state.otp_generado}` *(Ingrésalo abajo)*")
+                st.info(f"🔑 **Código de prueba:** `{st.session_state.otp_generado}` *(Cópialo e ingrésalo abajo)*")
             else:
-                st.success("Se ha enviado un mensaje de texto a tu celular.")
+                st.success("Código SMS enviado a tu teléfono.")
             
             codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos:", max_chars=6)
             
