@@ -4,13 +4,9 @@ import json
 import os
 import random
 import re
-import smtplib
 import time
-import traceback
 import urllib.parse
 import urllib.request
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from groq import Groq
 import streamlit as st
@@ -61,47 +57,39 @@ def guardar_todas_las_conversaciones(datos_totales):
     with open(ARCHIVO_CHATS_PERMANENTE, "w", encoding="utf-8") as f:
         json.dump(datos_totales, f, indent=4, ensure_ascii=False)
 
-def es_correo_valido(correo: str) -> bool:
-    patron = r'^[a-zA-Z0-9._%+-]+@gmail\.com$'
-    return bool(re.match(patron, correo.strip().lower()))
+def es_telefono_valido(telefono: str) -> bool:
+    """Valida que contenga entre 8 y 15 dígitos (con o sin código de país +)"""
+    limpio = telefono.strip().replace(" ", "").replace("-", "")
+    patron = r'^\+?[0-9]{8,15}$'
+    return bool(re.match(patron, limpio))
 
-def enviar_codigo_smtp(correo_destino, codigo_otp):
+def enviar_sms_otp(numero_destino, codigo_otp):
     """
-    Intenta enviar el correo vía SMTP si están configurados los secrets.
-    Si no hay credenciales SMTP, muestra el código en pantalla para desarrollo.
+    Si tienes credenciales de Twilio configuradas en st.secrets las usará.
+    Si no, entra en modo desarrollo para probar el flujo sin costo.
     """
-    smtp_server = st.secrets.get("SMTP_SERVER", "")
-    smtp_port = int(st.secrets.get("SMTP_PORT", 587))
-    smtp_user = st.secrets.get("SMTP_USER", "")
-    smtp_password = st.secrets.get("SMTP_PASSWORD", "")
+    twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID", "")
+    twilio_token = st.secrets.get("TWILIO_AUTH_TOKEN", "")
+    twilio_number = st.secrets.get("TWILIO_PHONE_NUMBER", "")
 
-    if smtp_user and smtp_password:
+    if twilio_sid and twilio_token and twilio_number:
         try:
-            msg = MIMEMultipart()
-            msg['From'] = smtp_user
-            msg['To'] = correo_destino
-            msg['Subject'] = f"{codigo_otp} es tu código de verificación para Isaac AI"
-
-            cuerpo = f"Tu código de acceso de 6 dígitos es: {codigo_otp}"
-            msg.attach(MIMEText(cuerpo, 'plain'))
-
-            server = smtplib.SMTP(smtp_server, smtp_port)
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.sendmail(smtp_user, correo_destino, msg.as_string())
-            server.quit()
-            return True, "Código enviado a tu bandeja de entrada."
+            from twilio.rest import Client
+            client = Client(twilio_sid, twilio_token)
+            client.messages.create(
+                body=f"Tu código de verificación para Isaac AI es: {codigo_otp}",
+                from_=twilio_number,
+                to=numero_destino
+            )
+            return True, "SMS enviado correctamente a tu celular.", False
         except Exception as e:
-            return False, f"Error al enviar correo: {e}"
+            return False, f"Error al enviar SMS: {e}", True
     else:
-        # Modo fallback/desarrollo si no hay servidor SMTP configurado
-        return True, f"🔑 (Modo Dev) Tu código de verificación es: **{codigo_otp}**"
-
-def encode_image_to_base64(image_file):
-    return base64.b64encode(image_file.getvalue()).decode('utf-8')
+        # Modo de prueba cuando no hay API de SMS configurada
+        return True, "Modo de prueba activo (Sin servicio SMS de pago)", True
 
 # ==========================================
-# 🔐 GESTIÓN DE SESIÓN Y VERIFICACIÓN OTP
+# 🔐 GESTIÓN DE SESIÓN Y VERIFICACIÓN SMS
 # ==========================================
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
@@ -109,52 +97,57 @@ if "autenticado" not in st.session_state:
     st.session_state.usuario_info = ""
 
 if "paso_login" not in st.session_state:
-    st.session_state.paso_login = "ingresar_correo" # 'ingresar_correo' o 'verificar_codigo'
+    st.session_state.paso_login = "ingresar_telefono"
 
 if "otp_generado" not in st.session_state:
     st.session_state.otp_generado = None
 
-if "correo_pendiente" not in st.session_state:
-    st.session_state.correo_pendiente = ""
-
-if "codigo_actualizacion" not in st.session_state:
-    st.session_state.codigo_actualizacion = "123"
+if "telefono_pendiente" not in st.session_state:
+    st.session_state.telefono_pendiente = ""
 
 # --- PANTALLA DE LOGIN ---
 if not st.session_state.autenticado:
     st.title("🤖 Bienvenido a Isaac AI")
     
-    opcion_acceso = st.radio("Selecciona tu método de acceso:", ["Continuar con Cuenta Gmail", "Acceder como Invitado"])
+    opcion_acceso = st.radio("Selecciona tu método de acceso:", ["Ingresar con Teléfono (SMS)", "Acceder como Invitado"])
     
-    if opcion_acceso == "Continuar con Cuenta Gmail":
+    if opcion_acceso == "Ingresar con Teléfono (SMS)":
         
-        # PASO 1: Ingresar correo
-        if st.session_state.paso_login == "ingresar_correo":
-            correo = st.text_input("Introduce tu correo electrónico (@gmail.com):", placeholder="usuario@gmail.com")
+        # PASO 1: Ingresar número de teléfono
+        if st.session_state.paso_login == "ingresar_telefono":
+            telefono = st.text_input(
+                "Introduce tu número de celular:", 
+                placeholder="Ejemplo: +50688888888 o 88888888"
+            )
             
-            if st.button("Enviar Código de Verificación", use_container_width=True):
-                if es_correo_valido(correo):
+            if st.button("Enviar Código por SMS", use_container_width=True):
+                if es_telefono_valido(telefono):
                     otp = str(random.randint(100000, 999999))
                     st.session_state.otp_generado = otp
-                    st.session_state.correo_pendiente = correo.lower().strip()
-                    
-                    exito, mensaje = enviar_codigo_smtp(st.session_state.correo_pendiente, otp)
-                    if exito:
-                        st.session_state.paso_login = "verificar_codigo"
-                        st.success(mensaje)
-                        st.rerun()
-                    else:
-                        st.error(mensaje)
+                    st.session_state.telefono_pendiente = telefono.strip()
+                    st.session_state.paso_login = "verificar_codigo"
+                    st.rerun()
                 else:
-                    st.error("Formato de correo inválido. Debe ser una dirección real terminada en @gmail.com")
+                    st.error("Número de teléfono inválido. Debe tener al menos 8 dígitos.")
         
-        # PASO 2: Ingresar código OTP de 6 dígitos
+        # PASO 2: Ingresar código de 6 dígitos
         elif st.session_state.paso_login == "verificar_codigo":
+            exito_sms, msj_sms, es_modo_dev = enviar_sms_otp(
+                st.session_state.telefono_pendiente, 
+                st.session_state.otp_generado
+            )
+
             st.markdown(f"""
             <div class="caja-otp">
-                📧 Hemos enviado un código de 6 dígitos a <b>{st.session_state.correo_pendiente}</b>
+                📱 Solicitud de SMS para el número: <b>{st.session_state.telefono_pendiente}</b>
             </div>
             """, unsafe_allow_html=True)
+
+            # En modo de prueba te muestra el código en pantalla para avanzar rápido
+            if es_modo_dev:
+                st.info(f"🔑 **Código de prueba:** `{st.session_state.otp_generado}` *(Ingrésalo abajo)*")
+            else:
+                st.success("Se ha enviado un mensaje de texto a tu celular.")
             
             codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos:", max_chars=6)
             
@@ -165,16 +158,16 @@ if not st.session_state.autenticado:
                     if codigo_ingresado.strip() == st.session_state.otp_generado:
                         st.session_state.autenticado = True
                         st.session_state.tipo_usuario = "Privilegiado"
-                        st.session_state.usuario_info = st.session_state.correo_pendiente
-                        st.session_state.paso_login = "ingresar_correo"
-                        st.success("¡Autenticación exitosa!")
+                        st.session_state.usuario_info = f"📱 {st.session_state.telefono_pendiente}"
+                        st.session_state.paso_login = "ingresar_telefono"
+                        st.success("¡Verificación correcta!")
                         st.rerun()
                     else:
                         st.error("El código ingresado es incorrecto.")
             
             with col_volver:
-                if st.button("Cambiar Correo", use_container_width=True):
-                    st.session_state.paso_login = "ingresar_correo"
+                if st.button("Cambiar Número", use_container_width=True):
+                    st.session_state.paso_login = "ingresar_telefono"
                     st.rerun()
 
     else:
@@ -196,24 +189,7 @@ def conectar_groq():
     return Groq(api_key=api_key)
 
 client = conectar_groq()
-
 MODELO_TEXTO = "llama-3.3-70b-versatile"
-MODELO_RAPIDO = "llama-3.1-8b-instant"
-MODELO_VISION = "llama-3.2-11b-vision-preview"
-
-@st.cache_data(ttl=3600)
-def detectar_pais_silencioso():
-    try:
-        url = "http://ip-api.com/json/"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=1) as response:
-            datos = json.loads(response.read().decode())
-            return f"{datos.get('city', 'Desconocida')}, {datos.get('country', 'Desconocido')}"
-    except Exception:
-        return "Ubicación Desconocida"
-
-if "ubicacion" not in st.session_state:
-    st.session_state.ubicacion = detectar_pais_silencioso()
 
 # ==========================================
 # 🔄 SINCRONIZACIÓN DE HISTORIAL
@@ -238,7 +214,6 @@ if ("chat_actual_id" not in st.session_state or
 # ==========================================
 with st.sidebar:
     st.write(f"### 👤 {st.session_state.usuario_info}")
-    st.caption(f"📍 {st.session_state.ubicacion}")
     
     if st.button("➕ Nueva conversación", use_container_width=True):
         nuevo_id = f"chat_{int(datetime.now().timestamp())}"
@@ -250,13 +225,8 @@ with st.sidebar:
         st.rerun()
         
     st.markdown("---")
-    
-    with st.expander("🔑 Código de actualización rápida", expanded=False):
-        nuevo_codigo = st.text_input("Código de comando:", value=st.session_state.codigo_actualizacion)
-        if nuevo_codigo:
-            st.session_state.codigo_actualizacion = nuevo_codigo.strip()
 
-    criterio_busqueda = st.text_input("🔍 Buscar conversación...", placeholder="Filtrar por tema...")
+    criterio_busqueda = st.text_input("🔍 Buscar conversación...", placeholder="Filtrar...")
     
     st.write("#### 💬 Recientes")
     for id_chat, datos_chat in list(st.session_state.conversaciones.items()):
@@ -291,22 +261,7 @@ with st.sidebar:
 chat_activo = st.session_state.conversaciones[st.session_state.chat_actual_id]
 st.title(f"{chat_activo['titulo']}")
 
-col_modo, col_potencia = st.columns(2)
-with col_modo:
-    modo_operacion = st.radio("Formato de respuesta:", ["💬 Texto / Chat"], key="selector_modo_ia")
-
-with col_potencia:
-    nivel_potencia = st.radio("Nivel de procesamiento:", ["⚡ Normal", "🚀 Pro (Doble Revisión)"], key="selector_potencia")
-
-# Área opcional de imágenes para análisis visual
-with st.expander("📷 Adjuntar Imagen para Análisis", expanded=False):
-    imagen_subida = st.file_uploader("Sube una imagen:", type=["png", "jpg", "jpeg", "webp"], key="uploader_imagen")
-    if imagen_subida:
-        st.image(imagen_subida, caption="Imagen cargada correctamente", use_container_width=True)
-
-st.markdown("---")
-
-# Renderizar historial de conversación
+# Renderizar historial
 for msg in chat_activo["historial"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -315,7 +270,7 @@ mensajes_enviados = sum(1 for m in chat_activo["historial"] if m["role"] == "use
 bloqueado_por_restriccion = st.session_state.tipo_usuario == "Invitado" and mensajes_enviados >= 5
 
 if bloqueado_por_restriccion:
-    st.error("⚠️ Límite del Modo Invitado alcanzado. Inicia sesión con Gmail para continuar.")
+    st.error("⚠️ Límite del Modo Invitado alcanzado. Inicia sesión para continuar.")
 
 if not bloqueado_por_restriccion:
     if prompt := st.chat_input("Escribe tu pregunta..."):
@@ -327,77 +282,48 @@ if not bloqueado_por_restriccion:
         if len(chat_activo["historial"]) == 1:
             chat_activo["titulo"] = prompt[:30].strip() + ("..." if len(prompt) > 30 else "")
 
-        # Comando de actualización rápida
-        if prompt.strip().lower().startswith(st.session_state.codigo_actualizacion.lower()) and "actualiz" in prompt.lower():
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            msg_exito = f"🔄 **Sistema actualizado.** Memoria caché limpia."
-            chat_activo["historial"].append({"role": "assistant", "content": msg_exito})
-            guardar_todas_las_conversaciones(base_datos_chats)
-            st.rerun()
+        with st.chat_message("assistant"):
+            ahora = datetime.now()
+            contexto_sistema = f"Eres Isaac AI, una IA inteligente y directa. Fecha actual: {ahora.strftime('%d/%m/%Y')}."
+            
+            mensajes_api = [{"role": "system", "content": contexto_sistema}]
+            
+            for m in chat_activo["historial"][-5:]:
+                role = m.get("role")
+                content_texto = str(m.get("content", ""))
+                if role in ["user", "assistant"] and content_texto.strip():
+                    if mensajes_api[-1]["role"] == role:
+                        mensajes_api[-1]["content"] += "\n" + content_texto
+                    else:
+                        mensajes_api.append({"role": role, "content": content_texto})
 
-        # Respuesta en Modo Texto
-        else:
-            with st.chat_message("assistant"):
-                ahora = datetime.now()
-                contexto_sistema = f"Eres Isaac AI, una IA inteligente y directa. Fecha actual: {ahora.strftime('%d/%m/%Y')}."
+            try:
+                marcador_texto = st.empty()
+                texto_completo = ""
                 
-                mensajes_api = [{"role": "system", "content": contexto_sistema}]
+                stream = client.chat.completions.create(
+                    model=MODELO_TEXTO,
+                    messages=mensajes_api,
+                    stream=True,
+                    temperature=0.3,
+                    max_tokens=800
+                )
                 
-                # Construir historial seguro sin duplicados
-                for m in chat_activo["historial"][-5:]:
-                    role = m.get("role")
-                    content_texto = str(m.get("content", ""))
-                    if role in ["user", "assistant"] and content_texto.strip():
-                        if mensajes_api[-1]["role"] == role:
-                            mensajes_api[-1]["content"] += "\n" + content_texto
-                        else:
-                            mensajes_api.append({"role": role, "content": content_texto})
+                for parte in stream:
+                    contenido = parte.choices[0].delta.content if parte.choices and parte.choices[0].delta else None
+                    if contenido:
+                        texto_completo += contenido
+                        marcador_texto.markdown(texto_completo + "▌")
+                        time.sleep(0.005)
+                        
+                marcador_texto.markdown(texto_completo)
 
-                modelo_a_usar = MODELO_TEXTO
+            except Exception as e:
+                texto_completo = f"🚨 **Error de API:** {e}"
+                st.markdown(texto_completo)
                 
-                # Manejo seguro de imágenes (Sin borrar la regla system)
-                if imagen_subida is not None:
-                    try:
-                        base64_img = encode_image_to_base64(imagen_subida)
-                        modelo_a_usar = MODELO_VISION
-                        mensajes_api.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                            ]
-                        })
-                    except Exception as e:
-                        st.warning(f"Error al procesar la imagen adjunta: {e}")
-
-                try:
-                    marcador_texto = st.empty()
-                    texto_completo = ""
-                    
-                    stream = client.chat.completions.create(
-                        model=modelo_a_usar,
-                        messages=mensajes_api,
-                        stream=True,
-                        temperature=0.3,
-                        max_tokens=800
-                    )
-                    
-                    for parte in stream:
-                        contenido = parte.choices[0].delta.content if parte.choices and parte.choices[0].delta else None
-                        if contenido:
-                            texto_completo += contenido
-                            marcador_texto.markdown(texto_completo + "▌")
-                            time.sleep(0.005)
-                            
-                    marcador_texto.markdown(texto_completo)
-
-                except Exception as e:
-                    texto_completo = f"🚨 **Error de API:** {e}"
-                    st.markdown(texto_completo)
-                    
-                chat_activo["historial"].append({"role": "assistant", "content": texto_completo})
-        
+            chat_activo["historial"].append({"role": "assistant", "content": texto_completo})
+    
         base_datos_chats[usuario_actual] = st.session_state.conversaciones
         guardar_todas_las_conversaciones(base_datos_chats)
         st.rerun()
