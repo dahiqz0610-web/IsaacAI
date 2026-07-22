@@ -4,9 +4,12 @@ import json
 import os
 import random
 import re
+import smtplib
 import time
 import urllib.parse
 import urllib.request
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from groq import Groq
 import streamlit as st
@@ -40,10 +43,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# CONFIGURACIÓN DE ARCHIVOS Y PERSISTENCIA
+# ARCHIVOS Y BASE DE DATOS
 # ==========================================
 ARCHIVO_CHATS_PERMANENTE = "historial_chats.json"
-NUMERO_REMITENTE_OFICIAL = "+50662457838"  # Número configurado para envíos
+ARCHIVO_USUARIOS = "usuarios.json"
+
+def cargar_usuarios():
+    if os.path.exists(ARCHIVO_USUARIOS):
+        with open(ARCHIVO_USUARIOS, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+def guardar_usuarios(datos_usuarios):
+    with open(ARCHIVO_USUARIOS, "w", encoding="utf-8") as f:
+        json.dump(datos_usuarios, f, indent=4, ensure_ascii=False)
 
 def cargar_todas_las_conversaciones():
     if os.path.exists(ARCHIVO_CHATS_PERMANENTE):
@@ -58,38 +74,44 @@ def guardar_todas_las_conversaciones(datos_totales):
     with open(ARCHIVO_CHATS_PERMANENTE, "w", encoding="utf-8") as f:
         json.dump(datos_totales, f, indent=4, ensure_ascii=False)
 
-def es_telefono_valido(telefono_completo: str) -> bool:
-    """Valida que el número tenga formato internacional (+506...) y suficientes dígitos"""
-    limpio = telefono_completo.strip().replace(" ", "").replace("-", "")
-    patron = r'^\+[0-9]{8,15}$'
-    return bool(re.match(patron, limpio))
+def es_correo_valido(correo: str) -> bool:
+    patron = r'^[a-zA-Z0-9._%+-]+@gmail\.com$'
+    return bool(re.match(patron, correo.strip().lower()))
 
-def enviar_sms_otp(numero_destino, codigo_otp):
+def enviar_email_otp(correo_destino, codigo_otp):
     """
-    Usa Twilio si las claves están en secrets. Si no, activa el modo prueba.
+    Intenta enviar correo si hay credenciales SMTP en secrets.
+    Si no las hay, activa el modo de prueba (gratis y visual en pantalla).
     """
-    twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID", "")
-    twilio_token = st.secrets.get("TWILIO_AUTH_TOKEN", "")
-    twilio_number = st.secrets.get("TWILIO_PHONE_NUMBER", NUMERO_REMITENTE_OFICIAL)
+    smtp_server = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(st.secrets.get("SMTP_PORT", 587))
+    smtp_user = st.secrets.get("SMTP_USER", "")
+    smtp_password = st.secrets.get("SMTP_PASSWORD", "")
 
-    if twilio_sid and twilio_token:
+    if smtp_user and smtp_password:
         try:
-            from twilio.rest import Client
-            client = Client(twilio_sid, twilio_token)
-            client.messages.create(
-                body=f"Tu código de verificación para Isaac AI es: {codigo_otp}",
-                from_=twilio_number,
-                to=numero_destino
-            )
-            return True, f"SMS enviado exitosamente desde {twilio_number}.", False
+            msg = MIMEMultipart()
+            msg['From'] = smtp_user
+            msg['To'] = correo_destino
+            msg['Subject'] = f"{codigo_otp} es tu código de verificación para Isaac AI"
+            
+            cuerpo = f"Tu código de acceso de 6 dígitos es: {codigo_otp}"
+            msg.attach(MIMEText(cuerpo, 'plain'))
+
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, correo_destino, msg.as_string())
+            server.quit()
+            return True, "Correo enviado correctamente a tu bandeja de entrada.", False
         except Exception as e:
-            return False, f"Error al enviar SMS: {e}", True
+            return False, f"Error SMTP: {e}", True
     else:
-        # Modo de prueba visual
-        return True, "Modo de prueba activo (Sin servicio SMS configurado)", True
+        # Modo de prueba 100% gratuito sin enviar correos reales aún
+        return True, "Modo de prueba activo (Sin SMTP configurado)", True
 
 # ==========================================
-# 🔐 GESTIÓN DE SESIÓN Y VERIFICACIÓN SMS
+# 🔐 GESTIÓN DE SESIÓN Y REGISTRO/LOGIN
 # ==========================================
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
@@ -97,101 +119,142 @@ if "autenticado" not in st.session_state:
     st.session_state.usuario_info = ""
 
 if "paso_login" not in st.session_state:
-    st.session_state.paso_login = "ingresar_telefono"
+    st.session_state.paso_login = "ingresar_correo"
 
 if "otp_generado" not in st.session_state:
     st.session_state.otp_generado = None
 
-if "telefono_pendiente" not in st.session_state:
-    st.session_state.telefono_pendiente = ""
+if "datos_registro_temp" not in st.session_state:
+    st.session_state.datos_registro_temp = {}
 
-# --- PANTALLA DE LOGIN ---
+db_usuarios = cargar_usuarios()
+
 if not st.session_state.autenticado:
     st.title("🤖 Bienvenido a Isaac AI")
     
-    opcion_acceso = st.radio("Selecciona tu método de acceso:", ["Ingresar con Teléfono (SMS)", "Acceder como Invitado"])
+    opcion_acceso = st.radio("Selecciona tu método de acceso:", ["Ingresar / Registrarse con Gmail", "Acceder como Invitado"])
     
-    if opcion_acceso == "Ingresar con Teléfono (SMS)":
+    if opcion_acceso == "Ingresar / Registrarse con Gmail":
         
-        # PASO 1: Seleccionar código de país e ingresar número
-        if st.session_state.paso_login == "ingresar_telefono":
-            st.write("### Inicia sesión con tu móvil")
+        # PASO 1: Correo electrónico
+        if st.session_state.paso_login == "ingresar_correo":
+            st.write("### Acceso con Correo Gmail")
             
-            col_codigo, col_numero = st.columns([0.4, 0.6])
+            correo = st.text_input("Introduce tu correo (@gmail.com):", placeholder="ejemplo@gmail.com")
+            correo_limpio = correo.strip().lower()
             
-            with col_codigo:
-                opcion_pais = st.selectbox(
-                    "Código de País:",
-                    [
-                        "+506 (Costa Rica)",
-                        "+1 (EE.UU. / Canadá)",
-                        "+52 (México)",
-                        "+34 (España)",
-                        "+57 (Colombia)",
-                        "+54 (Argentina)",
-                        "Otro (Manual)"
-                    ],
-                    index=0
-                )
-                
-                if "Otro" in opcion_pais:
-                    prefijo = st.text_input("Escribe el código:", value="+")
+            if st.button("Continuar", use_container_width=True):
+                if es_correo_valido(correo_limpio):
+                    st.session_state.correo_pendiente = correo_limpio
+                    
+                    # Verificar si existe en la base de usuarios registrada
+                    if correo_limpio in db_usuarios and db_usuarios[correo_limpio].get("password"):
+                        st.session_state.paso_login = "pedir_password"
+                    else:
+                        st.session_state.paso_login = "crear_perfil"
+                    st.rerun()
                 else:
-                    prefijo = opcion_pais.split(" ")[0]
+                    st.error("Por favor ingresa un correo terminado en @gmail.com")
 
-            with col_numero:
-                numero_local = st.text_input("Número de celular:", placeholder="62457838")
+        # PASO 2A: Si el usuario ya existe y configuró contraseña previamente
+        elif st.session_state.paso_login == "pedir_password":
+            correo_user = st.session_state.correo_pendiente
+            nombre_registrado = db_usuarios[correo_user].get("nombre", "Usuario")
+            st.write(f"### Hola de nuevo, **{nombre_registrado}** 👋")
             
-            telefono_completo = f"{prefijo}{numero_local.strip().replace(' ', '')}"
+            password_input = st.text_input("Ingresa tu contraseña:", type="password")
             
-            if st.button("Enviar Código por SMS", use_container_width=True):
-                if es_telefono_valido(telefono_completo) and len(numero_local.strip()) >= 7:
+            col_login, col_cambiar = st.columns([0.7, 0.3])
+            
+            with col_login:
+                if st.button("Iniciar Sesión", use_container_width=True):
+                    if password_input == db_usuarios[correo_user]["password"]:
+                        otp = str(random.randint(100000, 999999))
+                        st.session_state.otp_generado = otp
+                        st.session_state.datos_registro_temp = {
+                            "correo": correo_user,
+                            "nombre": nombre_registrado
+                        }
+                        st.session_state.paso_login = "verificar_codigo"
+                        st.rerun()
+                    else:
+                        st.error("Contraseña incorrecta.")
+            
+            with col_cambiar:
+                if st.button("Cambiar Correo", use_container_width=True):
+                    st.session_state.paso_login = "ingresar_correo"
+                    st.rerun()
+
+        # PASO 2B: Si el correo es nuevo o no tiene contraseña registrada
+        elif st.session_state.paso_login == "crear_perfil":
+            correo_user = st.session_state.correo_pendiente
+            st.write(f"### Configura tu perfil para `{correo_user}`")
+            st.caption("Asigna tu nombre y una contraseña personal para proteger tu cuenta.")
+            
+            nombre = st.text_input("Tu Nombre o Apodo:", placeholder="Ej. Isaac")
+            password = st.text_input("Crea una Contraseña (Opcional, déjala en blanco si prefieres sin clave):", type="password")
+            
+            if st.button("Enviar Código por Gmail", use_container_width=True):
+                if nombre.strip():
                     otp = str(random.randint(100000, 999999))
                     st.session_state.otp_generado = otp
-                    st.session_state.telefono_pendiente = telefono_completo
+                    st.session_state.datos_registro_temp = {
+                        "correo": correo_user,
+                        "nombre": nombre.strip(),
+                        "password": password.strip()
+                    }
                     st.session_state.paso_login = "verificar_codigo"
                     st.rerun()
                 else:
-                    st.error("Número inválido. Asegúrate de ingresar dígitos válidos.")
-        
-        # PASO 2: Ingresar código de 6 dígitos
+                    st.error("Por favor ingresa tu nombre.")
+
+        # PASO 3: Verificación del código enviado por correo
         elif st.session_state.paso_login == "verificar_codigo":
-            exito_sms, msj_sms, es_modo_dev = enviar_sms_otp(
-                st.session_state.telefono_pendiente, 
+            datos_temp = st.session_state.datos_registro_temp
+            exito_smtp, msj_smtp, es_modo_dev = enviar_email_otp(
+                datos_temp["correo"], 
                 st.session_state.otp_generado
             )
 
             st.markdown(f"""
             <div class="caja-otp">
-                📱 Solicitud enviada desde el número: <b>+506 6245 7838</b><br>
-                📩 Destino: <b>{st.session_state.telefono_pendiente}</b>
+                📧 Código de verificación para: <b>{datos_temp['correo']}</b><br>
+                👤 Usuario: <b>{datos_temp['nombre']}</b>
             </div>
             """, unsafe_allow_html=True)
 
             if es_modo_dev:
                 st.info(f"🔑 **Código de prueba:** `{st.session_state.otp_generado}` *(Cópialo e ingrésalo abajo)*")
             else:
-                st.success("Código SMS enviado a tu teléfono.")
+                st.success("Se ha enviado un código a tu cuenta de Gmail.")
             
             codigo_ingresado = st.text_input("Ingresa el código de 6 dígitos:", max_chars=6)
             
             col_validar, col_volver = st.columns([0.7, 0.3])
             
             with col_validar:
-                if st.button("Verificar e Iniciar Sesión", use_container_width=True):
+                if st.button("Confirmar e Iniciar Sesión", use_container_width=True):
                     if codigo_ingresado.strip() == st.session_state.otp_generado:
+                        # Guardar perfil de usuario
+                        correo_user = datos_temp["correo"]
+                        db_usuarios[correo_user] = {
+                            "nombre": datos_temp["nombre"],
+                            "password": datos_temp.get("password", "")
+                        }
+                        guardar_usuarios(db_usuarios)
+                        
                         st.session_state.autenticado = True
                         st.session_state.tipo_usuario = "Privilegiado"
-                        st.session_state.usuario_info = f"📱 {st.session_state.telefono_pendiente}"
-                        st.session_state.paso_login = "ingresar_telefono"
-                        st.success("¡Verificación correcta!")
+                        st.session_state.usuario_info = f"{datos_temp['nombre']} ({correo_user})"
+                        st.session_state.paso_login = "ingresar_correo"
+                        st.success("¡Bienvenido!")
                         st.rerun()
                     else:
                         st.error("El código ingresado es incorrecto.")
             
             with col_volver:
-                if st.button("Cambiar Número", use_container_width=True):
-                    st.session_state.paso_login = "ingresar_telefono"
+                if st.button("Volver", use_container_width=True):
+                    st.session_state.paso_login = "ingresar_correo"
                     st.rerun()
 
     else:
@@ -205,7 +268,7 @@ if not st.session_state.autenticado:
     st.stop()
 
 # ==========================================
-# CONEXIÓN A GROQ API Y MODELOS
+# CONEXIÓN A GROQ API
 # ==========================================
 @st.cache_resource
 def conectar_groq():
@@ -216,7 +279,7 @@ client = conectar_groq()
 MODELO_TEXTO = "llama-3.3-70b-versatile"
 
 # ==========================================
-# 🔄 SINCRONIZACIÓN DE HISTORIAL
+# 🔄 HISTORIAL DE CHATS
 # ==========================================
 base_datos_chats = cargar_todas_las_conversaciones()
 usuario_actual = st.session_state.usuario_info
@@ -234,7 +297,7 @@ if ("chat_actual_id" not in st.session_state or
     st.session_state.chat_actual_id = list(st.session_state.conversaciones.keys())[0]
 
 # ==========================================
-# 💾 BARRA LATERAL CON AJUSTES
+# 💾 BARRA LATERAL
 # ==========================================
 with st.sidebar:
     st.write(f"### 👤 {st.session_state.usuario_info}")
@@ -285,7 +348,6 @@ with st.sidebar:
 chat_activo = st.session_state.conversaciones[st.session_state.chat_actual_id]
 st.title(f"{chat_activo['titulo']}")
 
-# Renderizar historial
 for msg in chat_activo["historial"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
